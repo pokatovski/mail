@@ -4,36 +4,26 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/net/html"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 )
 
 func main() {
-	// Open our jsonFile
 	jsonFile, err := os.Open("500.jsonl")
-	// if we os.Open returns an error then handle it
 	if err != nil {
 		fmt.Println(err)
 	}
-	fmt.Println("Successfully Opened users.json")
-	// defer the closing of our jsonFile so that we can parse it later on
 	defer jsonFile.Close()
-
-	//byteValue, _ := ioutil.ReadAll(jsonFile)
-	//
-	//fmt.Println(string(byteValue))
 
 	type CategoryItemJson struct {
 		Url        string   `json:"url"`
 		Categories []string `json:"categories"`
 	}
 
-	type CategoryItem struct {
-		Url        string
-		Categories []string
-	}
-
-	//todo: make size
 	categoriesMap := make(map[string][]string)
 
 	scanner := bufio.NewScanner(jsonFile)
@@ -47,23 +37,35 @@ func main() {
 			categoriesMap[item] = append(categoriesMap[item], Category.Url)
 		}
 	}
-	//fmt.Println(categoriesMap)
+
 	for category, urls := range categoriesMap {
 		fmt.Println("category: ", category)
-		fileName := fmt.Sprintf("%s.tsv", category)
-		f, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			log.Fatal(err)
-		}
-		for _, url := range urls {
-			fmt.Println("url: ", url)
-			result := fmt.Sprintf("%s \t %s \t %s \n", url, "header", "desc")
-			_, err = f.Write([]byte(result))
+		if category == "yellow" {
+			fileName := fmt.Sprintf("%s.tsv", category)
+			f, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				log.Fatal(err)
 			}
+			for _, url := range urls {
+				resp, err := http.Get(url)
+				if err != nil {
+					panic(err)
+				}
+
+				fmt.Println("resp.Header", resp.StatusCode)
+				body, err := ioutil.ReadAll(resp.Body)
+
+				//fmt.Println(h.Body.Content)
+				fmt.Println("url: ", url)
+				result := fmt.Sprintf("%s \t %s \t %s \n", url, getTitle(string(body)), getDesc(string(body)))
+				_, err = f.Write([]byte(result))
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
+			_ = f.Close()
 		}
-		_ = f.Close()
+
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -98,6 +100,83 @@ func main() {
 	//close(jobs)
 	//close(totalChannel)
 	//<-done
+}
+
+func getTitle(HTMLString string) (title string) {
+
+	r := strings.NewReader(HTMLString)
+	z := html.NewTokenizer(r)
+
+	var i int
+	for {
+		tt := z.Next()
+
+		i++
+		if i > 100 { // Title should be one of the first tags
+			return
+		}
+
+		switch {
+		case tt == html.ErrorToken:
+			// End of the document, we're done
+			return
+		case tt == html.StartTagToken:
+			t := z.Token()
+
+			// Check if the token is an <title> tag
+			if t.Data != "title" {
+				continue
+			}
+
+			// fmt.Printf("%+v\n%v\n%v\n%v\n", t, t, t.Type.String(), t.Attr)
+			tt := z.Next()
+
+			if tt == html.TextToken {
+				t := z.Token()
+				title = t.Data
+				return
+				// fmt.Printf("%+v\n%v\n", t, t.Data)
+			}
+		}
+	}
+}
+func getDesc(HTMLString string) (title string) {
+
+	r := strings.NewReader(HTMLString)
+	z := html.NewTokenizer(r)
+
+	var i int
+	for {
+		tt := z.Next()
+
+		i++
+		if i > 100 { // Title should be one of the first tags
+			return
+		}
+
+		switch {
+		case tt == html.ErrorToken:
+			// End of the document, we're done
+			return
+		case tt == html.StartTagToken:
+			t := z.Token()
+
+			// Check if the token is an <title> tag
+			if t.Data != "script" {
+				continue
+			}
+
+			// fmt.Printf("%+v\n%v\n%v\n%v\n", t, t, t.Type.String(), t.Attr)
+			tt := z.Next()
+
+			if tt == html.TextToken {
+				t := z.Token()
+				title = t.Data
+				return
+				// fmt.Printf("%+v\n%v\n", t, t.Data)
+			}
+		}
+	}
 }
 
 //func process(url string, totalChannel chan int, jobs <-chan struct{}, wg *sync.WaitGroup) {
