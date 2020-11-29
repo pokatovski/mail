@@ -53,6 +53,8 @@ func main() {
 			log.Fatal("err Unmarshal ", err)
 		}
 		if len(Category.Categories) > 0 {
+			// берем всегда только первую категорию,
+			// потому что в тестовом файле представлены урлы только с одной категорией
 			item := Category.Categories[0]
 			categoriesMap[item] = append(categoriesMap[item], Category.Url)
 		}
