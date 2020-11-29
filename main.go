@@ -4,13 +4,31 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/html"
-	"io/ioutil"
+	m "github.com/keighl/metabolize"
+	"io"
+
 	"log"
 	"net/http"
+
 	"os"
-	"strings"
+	"sync"
+	"time"
 )
+
+type MetaData struct {
+	Title       string `meta:"og:title"`
+	Description string `meta:"og:description,description"`
+}
+type SyncWriter struct {
+	m      sync.Mutex
+	Writer io.Writer
+}
+
+func (w *SyncWriter) Write(b []byte) (n int, err error) {
+	w.m.Lock()
+	defer w.m.Unlock()
+	return w.Writer.Write(b)
+}
 
 func main() {
 	jsonFile, err := os.Open("500.jsonl")
@@ -28,6 +46,8 @@ func main() {
 
 	scanner := bufio.NewScanner(jsonFile)
 	Category := CategoryItemJson{}
+
+	// пробегаемся по файлу и создаем мапу по категориям
 	for scanner.Scan() {
 		if err := json.Unmarshal(scanner.Bytes(), &Category); err != nil {
 			log.Fatal("err Unmarshal ", err)
@@ -38,158 +58,55 @@ func main() {
 		}
 	}
 
+	// Проходим по всем категориям. Ставим таймаут на ответ в 10 секунд.
+	// Если ответа нет, статус не 200 или не можем распарсить содержимое - пропускаем урл.
 	for category, urls := range categoriesMap {
-		fmt.Println("category: ", category)
-		if category == "yellow" {
-			fileName := fmt.Sprintf("%s.tsv", category)
-			f, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				log.Fatal(err)
-			}
-			for _, url := range urls {
-				resp, err := http.Get(url)
-				if err != nil {
-					panic(err)
-				}
-
-				fmt.Println("resp.Header", resp.StatusCode)
-				body, err := ioutil.ReadAll(resp.Body)
-
-				//fmt.Println(h.Body.Content)
-				fmt.Println("url: ", url)
-				result := fmt.Sprintf("%s \t %s \t %s \n", url, getTitle(string(body)), getDesc(string(body)))
-				_, err = f.Write([]byte(result))
-				if err != nil {
-					log.Fatal(err)
-				}
-			}
-			_ = f.Close()
+		fileName := fmt.Sprintf("%s.tsv", category)
+		f, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatal(err)
 		}
 
+		wr := &SyncWriter{sync.Mutex{}, f}
+		wg := sync.WaitGroup{}
+		for _, url := range urls {
+			wg.Add(1)
+			go func(url string) {
+				client := http.Client{
+					Timeout: 10 * time.Second,
+				}
+				resp, err := client.Get(url)
+				if err != nil {
+					log.Println("failed for get response from url: ", url)
+					wg.Done()
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					log.Println("bad status from url: ", url)
+					wg.Done()
+					return
+				}
+				data := &MetaData{}
+				// todo: беда с windows-1251
+				err = m.Metabolize(resp.Body, data)
+				if err != nil {
+					log.Println("failed for reading response body, url: ", url)
+					wg.Done()
+					return
+				}
+				result := fmt.Sprintf("%s \t %s \t %s \n", url, data.Title, data.Description)
+				_, err = wr.Write([]byte(result))
+				if err != nil {
+					wg.Done()
+					log.Fatal(err)
+				}
+				wg.Done()
+			}(url)
+		}
+		wg.Wait()
+		_ = f.Close()
 	}
-
 	if err := scanner.Err(); err != nil {
 		log.Fatal("err scanner ", err)
 	}
-
-	//totalChannel := make(chan int)
-	//scanner := bufio.NewScanner(os.Stdin)
-	//maxGoroutines := 5
-	//done := make(chan struct{})
-	//go func(totalChannel <-chan int, done chan<- struct{}) {
-	//	var total int
-	//	for result := range totalChannel {
-	//		total += result
-	//	}
-	//	fmt.Printf("Total: %d\n", total)
-	//	done <- struct{}{}
-	//}(totalChannel, done)
-	//
-	//jobs := make(chan struct{}, maxGoroutines)
-	//var wg sync.WaitGroup
-	//for scanner.Scan() {
-	//	jobs <- struct{}{}
-	//	wg.Add(1)
-	//	go process(scanner.Text(), totalChannel, jobs, &wg)
-	//}
-	//if err := scanner.Err(); err != nil {
-	//	fmt.Fprintln(os.Stderr, "error:", err)
-	//	os.Exit(1)
-	//}
-	//wg.Wait()
-	//close(jobs)
-	//close(totalChannel)
-	//<-done
 }
-
-func getTitle(HTMLString string) (title string) {
-
-	r := strings.NewReader(HTMLString)
-	z := html.NewTokenizer(r)
-
-	var i int
-	for {
-		tt := z.Next()
-
-		i++
-		if i > 100 { // Title should be one of the first tags
-			return
-		}
-
-		switch {
-		case tt == html.ErrorToken:
-			// End of the document, we're done
-			return
-		case tt == html.StartTagToken:
-			t := z.Token()
-
-			// Check if the token is an <title> tag
-			if t.Data != "title" {
-				continue
-			}
-
-			// fmt.Printf("%+v\n%v\n%v\n%v\n", t, t, t.Type.String(), t.Attr)
-			tt := z.Next()
-
-			if tt == html.TextToken {
-				t := z.Token()
-				title = t.Data
-				return
-				// fmt.Printf("%+v\n%v\n", t, t.Data)
-			}
-		}
-	}
-}
-func getDesc(HTMLString string) (title string) {
-
-	r := strings.NewReader(HTMLString)
-	z := html.NewTokenizer(r)
-
-	var i int
-	for {
-		tt := z.Next()
-
-		i++
-		if i > 100 { // Title should be one of the first tags
-			return
-		}
-
-		switch {
-		case tt == html.ErrorToken:
-			// End of the document, we're done
-			return
-		case tt == html.StartTagToken:
-			t := z.Token()
-
-			// Check if the token is an <title> tag
-			if t.Data != "script" {
-				continue
-			}
-
-			// fmt.Printf("%+v\n%v\n%v\n%v\n", t, t, t.Type.String(), t.Attr)
-			tt := z.Next()
-
-			if tt == html.TextToken {
-				t := z.Token()
-				title = t.Data
-				return
-				// fmt.Printf("%+v\n%v\n", t, t.Data)
-			}
-		}
-	}
-}
-
-//func process(url string, totalChannel chan int, jobs <-chan struct{}, wg *sync.WaitGroup) {
-//	resp, err := http.Get(url)
-//	if err != nil {
-//		panic(err)
-//	}
-//	defer wg.Done()
-//	defer resp.Body.Close()
-//	body, err := ioutil.ReadAll(resp.Body)
-//	bodyString := string(body)
-//
-//	fmt.Printf("Count for %s: %d\n", url, strings.Count(bodyString, "Go"))
-//	totalChannel <- strings.Count(bodyString, "Go")
-//	<-jobs
-//}
