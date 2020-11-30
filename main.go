@@ -6,7 +6,6 @@ import (
 	"fmt"
 	m "github.com/keighl/metabolize"
 	"io"
-
 	"log"
 	"net/http"
 
@@ -14,6 +13,9 @@ import (
 	"sync"
 	"time"
 )
+
+// максимальное кол-во запущенных горутин
+const maxGoroutines = 10
 
 type MetaData struct {
 	Title       string `meta:"og:title"`
@@ -60,6 +62,9 @@ func main() {
 		}
 	}
 
+
+	maxGoroutines := maxGoroutines
+	jobs := make(chan struct{}, maxGoroutines)
 	// Проходим по всем категориям. Ставим таймаут на ответ в 10 секунд.
 	// Если ответа нет, статус не 200 или не можем распарсить содержимое - пропускаем урл.
 	for category, urls := range categoriesMap {
@@ -71,44 +76,52 @@ func main() {
 
 		wr := &SyncWriter{sync.Mutex{}, f}
 		wg := sync.WaitGroup{}
+		wgc := sync.WaitGroup{}
 		for _, url := range urls {
 			wg.Add(1)
-			go func(url string) {
-				client := http.Client{
-					Timeout: 10 * time.Second,
-				}
-				resp, err := client.Get(url)
-				if err != nil {
-					log.Println("failed for get response from url: ", url)
-					wg.Done()
-					return
-				}
-				if resp.StatusCode != http.StatusOK {
-					log.Println("bad status from url: ", url)
-					wg.Done()
-					return
-				}
-				data := &MetaData{}
-				// todo: беда с windows-1251
-				err = m.Metabolize(resp.Body, data)
-				if err != nil {
-					log.Println("failed for reading response body, url: ", url)
-					wg.Done()
-					return
-				}
-				result := fmt.Sprintf("%s \t %s \t %s \n", url, data.Title, data.Description)
-				_, err = wr.Write([]byte(result))
-				if err != nil {
-					wg.Done()
-					log.Fatal(err)
-				}
-				wg.Done()
-			}(url)
+			wgc.Add(1)
+			jobs <- struct{}{}
+			go process(url, jobs, &wgc, &wg, wr)
 		}
 		wg.Wait()
+		wgc.Wait()
 		_ = f.Close()
 	}
+	close(jobs)
 	if err := scanner.Err(); err != nil {
 		log.Fatal("err scanner ", err)
 	}
+}
+
+func process(url string, jobs <-chan struct{}, wgc *sync.WaitGroup, wg *sync.WaitGroup, wr *SyncWriter) {
+	client := http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(url)
+	defer wg.Done()
+	defer wgc.Done()
+	if err != nil {
+		log.Println("failed for get response from url: ", url)
+		<-jobs
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Println("bad status from url: ", url)
+		<-jobs
+		return
+	}
+	data := &MetaData{}
+	// todo: беда с windows-1251
+	err = m.Metabolize(resp.Body, data)
+	if err != nil {
+		log.Println("failed for reading response body, url: ", url)
+		<-jobs
+		return
+	}
+	result := fmt.Sprintf("%s \t %s \t %s \n", url, data.Title, data.Description)
+	_, err = wr.Write([]byte(result))
+	if err != nil {
+		log.Fatal(err)
+	}
+	<-jobs
 }
